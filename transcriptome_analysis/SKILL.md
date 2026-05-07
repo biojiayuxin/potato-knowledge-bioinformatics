@@ -90,6 +90,36 @@ zcat sample.fastq.gz | head -8
 
 必要时可先对单个样本做小规模 smoke test；若 `gzip -t` 失败，通常应重新下载原始 FASTQ，而不是仅重装 fastp。已验证在本机上，即使更换到另一版 fastp，损坏输入仍可能表现为卡住或超时，因此该类问题的根因通常在输入数据。
 
+**不要把 fastp 输出存在当作原始 FASTQ 完整性的证据**：已验证 `fastp 1.3.3` 在某些 gzip 尾部 CRC/length 错误或 FASTQ 尾部异常时，可能在日志中写出 `ERROR: sequence and quality have different length:`、`Your FASTQ may be invalid, please check the tail of your FASTQ file`、`WARNING: different read numbers ...`、`Ignore the unmatched reads`，但仍以成功退出码结束并生成 `.clean.fastq.gz`、`.json`、`.html`，从而被 Snakemake 判定为完成。遇到“gzip 检查失败但 fastp 已完成”的矛盾时，应以 `gzip -t`/CRC 结果和 fastp 日志中的 invalid FASTQ 警告为准；这些 fastp 结果不应直接进入 HISAT2/StringTie。建议交叉核对：
+
+```bash
+# 1) 从 gzip_integrity_failed.tsv 取 sample_id/run/mate
+# 2) 检查对应 fastp 日志是否含异常而非只看输出文件是否存在
+grep -E 'ERROR:|Your FASTQ may be invalid|different read numbers|Ignore the unmatched reads' logs/fastp/{sample_id}.log
+# 3) 修复策略：重下载损坏 FASTQ 后，删除或强制重跑受影响 sample_id 的 fastp 输出
+```
+
+注意：文件大小等于 ENA manifest `bytes` 也不能完全证明 gzip 内容正确；CRC/ISIZE 不一致时，`gzip -t` 仍会失败，应重新下载。
+
+**大批量 FASTQ gzip 完整性检测（Slurm 后台模式）**：当用户要求对全部 FASTQ 做 gzip 完整性检测且“不要长时间占用前台窗口”时，应生成独立检测目录并提交 Slurm 后台任务，而不是在前台循环 `gzip -t`。推荐布局：
+
+```text
+paired_end/00-gzip-check/
+├── scripts/
+│   ├── check_fastq_gzip_integrity.py
+│   ├── run_gzip_integrity_check.sh
+│   └── gzip_integrity_check.slurm.sh
+├── logs/
+└── latest -> results_YYYYMMDD_HHMMSS
+```
+
+实现要点：
+1. 以 paired-end manifest（如 `samples.manifest.tsv`，包含 `run/sample_id/r1/r2`）为准展开 R1/R2 文件列表；不要重新扫描目录猜测样本。
+2. Python 检测脚本用 `ProcessPoolExecutor` 并发调用 `gzip -t`（或等价 gzip 流读取），输出：`gzip_integrity_results.tsv`、`gzip_integrity_failed.tsv`、`gzip_integrity_summary.json`、`gzip_integrity_progress.log`，全部通过时写 `gzip_integrity.ok`，有失败时写 `gzip_integrity.failed` 并以非零退出。
+3. 提交前只做轻量验证：`python3 -m py_compile`、`bash -n`、以及 `--limit 1` 的单文件 smoke test；不要在前台完整检测全部 FASTQ。
+4. Slurm wrapper 建议按数据量设置如 `--cpus-per-task=16`、`--mem=16G`、`--time=08:00:00`，用 `slurm-user-jobs/scripts/submit-job.sh --script ...` 提交，并立即用 `list-jobs.sh` / `job-status.sh JOBID` 确认进入 RUNNING/PENDING。
+5. 向用户汇报时给出 Job ID、检测文件总数、`latest/gzip_integrity_progress.log`、`logs/slurm-JOBID.out/.err`、完成后结果文件路径；不要声称检测已完成，除非已经读取 summary/marker 验证。
+
 
 ---
 

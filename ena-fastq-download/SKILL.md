@@ -152,7 +152,8 @@ PARALLEL=1 MAX_RETRIES=5 RETRY_SLEEP=20 \
 4. Slurm 提交前做：`bash -n`、`python3 -m py_compile verify_missing.py`、`DRY_RUN=1 bash download_missing_fastq.sh`、`submit-job.sh --print-only ...`。
 4. 提交 Slurm 时优先使用 `slurm-user-jobs/scripts/submit-job.sh --script ...`，不要用复杂 `--command`；提交后用 `list-jobs.sh` 和 `job-status.sh JOBID` 确认 `RUNNING/PENDING`，并汇报日志路径。
 5. 在重跑补下载前，先把旧的 retry 目录日志和状态文件归档一份；许多补下载脚本会在启动时清空/重建 `downloaded_files.txt`、`failed_files.txt` 和主日志，直接复跑会丢失上一次 job 的诊断痕迹。
-6. 如果本目录找不到 `ascp` 或 key，可搜索旧下载目录中已解包/安装的 Aspera 组件。不要只找 Connect DSA key，优先找 SDK 版 `ascp` + SDK bypass key：
+6. 判断 Slurm 补下载是否完成时，不要只看 `downloaded_files.txt`/`failed_files.txt` 的行数；某些并发/包装脚本场景下这些汇总文件可能为空，但 `status/*.done`、主日志 `[OK]`/`[DONE]`、Slurm stderr、manifest 文件大小核对才是更可靠依据。最小核对组合：`list-jobs.sh` 确认任务已离队；统计 `status/*.done` 与 retry manifest 行数一致；`status/*.fail` 为 0；按 manifest `bytes` 逐行检查目标 FASTQ 存在且大小一致；检查没有 `.partial`/`.aspera-ckpt` 残留。
+7. 如果本目录找不到 `ascp` 或 key，可搜索旧下载目录中已解包/安装的 Aspera 组件。不要只找 Connect DSA key，优先找 SDK 版 `ascp` + SDK bypass key：
    - `.../.aspera-sdk/ascp`
    - `.../.home-ruby/.aspera/sdk/aspera_bypass_rsa.pem`
    - `~/.aspera/sdk/aspera_bypass_rsa.pem`
@@ -169,6 +170,9 @@ PARALLEL=1 MAX_RETRIES=5 RETRY_SLEEP=20 \
    - 可把 key 复制到临时目录并 `chmod 600` 后测试，排除权限过宽问题；可用 `ssh-keygen -y/-lf` 输出公钥指纹验证 key 是否可解析，但不要输出或保存私钥内容；
    - 测试目录中若复制过 key，测试结束后必须删除，避免留下额外私钥副本。
 8. 注意 Bash 陷阱：不要用 `if [[ "$(prepare_target ...)" == complete ]]` 包住会写日志/移动文件的函数；命令替换会吞掉 stdout 日志，并且可能隐藏副作用。让函数用 return code 表示是否已完成：`if prepare_target ...; then ... fi`。
+9. 对 MD5 mismatch 文件做补下载脚本时，`DRY_RUN=1` 不应重新计算所有大 FASTQ 的 MD5；否则 dry-run 也会被数百 GB I/O 拖慢甚至超时。dry-run 只检查文件存在/大小并打印“would move / would download”，必要时把“大小一致但已知 MD5 异常”的文件视为需重下即可。
+10. 若并发下载用 `python manifest_to_nul | xargs -0 -n N -P P bash -c 'download_one "$@"' _`，在 `set -euo pipefail` 脚本中应临时 `set +e` 包住该 pipeline，保存 `xargs_rc` 后再 `set -e`；否则任一文件失败会使主脚本提前退出，跳过最终 verify/summary。真实运行仍应在下载阶段后统一执行 retry manifest 的 size+MD5 验证并以验证结果作为最终退出码。
+11. 1 MB Aspera 连通性测试脚本若用 Python 从环境变量读取 `MANIFEST`，必须先 `export MANIFEST=...`；普通 shell 变量不会传给 Python 子进程。
 
 ### 4. 最终核对
 
@@ -186,6 +190,45 @@ python3 scripts/verify_ena_fastq_download.py \
 - `ckpt_count == 0`
 
 如果需要把“不完整下载”作为失败条件，添加 `--strict`。
+
+#### 用 ENA MD5 复核 FASTQ 完整性
+
+当 manifest 或 ENA Portal API 可提供 `fastq_md5` 时，优先用 MD5 作为最终完整性依据；文件大小等于 `fastq_bytes` 只能说明字节数一致，不能排除内容错误。`fastp` 成功输出也不能证明原始 FASTQ 完整，fastp 可能容忍尾部 CRC/FASTQ 格式异常并以 0 退出。
+
+若本地 manifest 没有 MD5，可重新查询 ENA Portal API，字段至少包括：
+
+```text
+run_accession,fastq_aspera,fastq_ftp,fastq_bytes,fastq_md5,library_layout
+```
+
+然后生成文件级 manifest，推荐字段：
+
+```text
+run_accession sample_name mate filename aspera_source ftp_url bytes md5 layout
+```
+
+大批量核查建议生成独立目录，例如：
+
+```text
+00-md5-check/
+├── scripts/
+│   ├── check_fastq_md5.py
+│   ├── run_md5_check.sh
+│   └── md5_check.slurm.sh
+└── latest -> results_YYYYMMDD_HHMMSS
+```
+
+实现要点：
+1. 以含 `md5` 的 ENA 文件级 manifest 为准逐行核查，不要重新扫描目录猜测文件。
+2. 并发计算本地 FASTQ 压缩文件的 MD5，输出：
+   - `fastq_md5_results.tsv`：全部文件结果；
+   - `fastq_md5_failed.tsv`：`MISSING` / `SIZE_MISMATCH` / `MD5_MISMATCH` 等异常行；
+   - `bad_fastq_filenames.txt`：仅问题文件名，一行一个，便于人工查看；
+   - `retry_md5_failed_manifest.tsv`：保留原 manifest 字段、仅包含异常 FASTQ，可直接用于后续 Aspera 补下载；
+   - `fastq_md5_summary.json` 与 `fastq_md5_progress.log`。
+3. `md5sum` 读取压缩字节流，不解压，通常比 `gzip -t` 更适合用 ENA 校验值做最终判定；但仍会受磁盘 I/O 限制，大数据集应走 Slurm/后台。
+4. 若 gzip 检查失败清单与 MD5 mismatch 清单不一致，应以 MD5 mismatch/缺失/大小不符作为重下载清单，并保留两者交叉表便于排查。
+5. 重下载后必须再次对 retry manifest 或全量 manifest 做 MD5 核查；下游 RNA-seq 质控/比对前，应删除或强制重跑受异常原始 FASTQ 影响的 fastp 输出，避免复用旧 clean FASTQ。
 
 ### 5. 检查历史下载任务是否已经完成
 
