@@ -274,7 +274,9 @@ disown
 **Slurm 资源提交建议**：如果用户明确给出 CPU/内存配额，或本机任务适合走 Slurm，应同时生成但不要擅自提交：
 1. 一个实际运行脚本（例如 `run_snakemake_80cpu_50g.sh`），内部设置 `XDG_CACHE_HOME`、进入工作目录，并用 micromamba 环境执行 `snakemake --cores {CPU} --resources mem_mb={MEM_MB} --rerun-incomplete --printshellcmds`，主日志写入 `pipeline.log`；
 2. 一个 Slurm 脚本（例如 `submit_snakemake_80cpu_50g.slurm.sh`），设置 `--cpus-per-task`、`--mem`、`--time`、`--chdir`、`--output/--error`，调用运行脚本。
-正式提交前仍必须完成 dry-run 并获得用户明确批准。若本机安装了 `slurm-user-jobs` 技能，应遵循该技能的 Slurm 提交规范。
+**要求**：若 `snakemake -n` 报错，必须先修复流程文件后再提交运行。
+
+**Snakemake 版本兼容注意**：在本机已验证 Snakemake 9.20.0 不支持旧版常见参数 `--reason`，正式运行脚本中不要使用该参数，否则任务会打印 usage 后立即退出。需要详细日志时可使用 `--printshellcmds --show-failed-logs`；Snakemake 9.x 的日志通常仍会输出 rule 的 reason 信息。
 
 **断点续传**：中断后重新运行 `snakemake -j {threads}`，自动跳过已完成步骤。
 
