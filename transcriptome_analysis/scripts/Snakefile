@@ -16,6 +16,9 @@ READ_LENGTH = config.get("read_length", 150)
 CONTROL_GROUP = config["groups"]["control"]
 TREAT_GROUP = config["groups"]["treatment"]
 SAMPLES = config["samples"]
+FASTP_EXTRA = config.get("fastp_extra", "")
+FASTP_TIMEOUT = config.get("fastp_timeout", "3h")
+FASTP_KILL_AFTER = config.get("fastp_kill_after", "5m")
 
 # 索引处理逻辑
 # 如果提供了 hisat2_index_prefix 且文件存在，则使用它；
@@ -85,13 +88,20 @@ rule fastp:
         json = "00-fastp/{sample}.json",
         html = "00-fastp/{sample}.html"
     threads: THREADS
+    params:
+        extra = FASTP_EXTRA,
+        timeout = FASTP_TIMEOUT,
+        kill_after = FASTP_KILL_AFTER
     shell:
         """
-        fastp -i {input.r1} -o {output.r1} \
+        mkdir -p 00-fastp
+        timeout --kill-after={params.kill_after} {params.timeout} fastp \
+              -i {input.r1} -o {output.r1} \
               -I {input.r2} -O {output.r2} \
               -j {output.json} \
               -h {output.html} \
-              -w {threads}
+              -w {threads} \
+              {params.extra}
         """
 
 # ============================================================
@@ -171,7 +181,7 @@ rule prep_count_matrix:
 # ============================================================
 rule deseq2_analysis:
     input:
-        count = "02-stringtie/gene_count_matrix.csv",
+        count_matrix = "02-stringtie/gene_count_matrix.csv",
         groups = "groups.txt"
     output:
         result = "03-deseq2/deseq2_result.xls",

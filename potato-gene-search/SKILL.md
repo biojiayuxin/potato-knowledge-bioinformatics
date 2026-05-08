@@ -156,9 +156,46 @@ python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include
 
 验证默认详情输出中不应包含顶层 `cds`、`pep`、`genomic`、`promoter` 字段；显式 `--include-sequences` 后才应返回对应字段。
 
+## 本地数据库降级方案（API 502/不可用时）
+
+如果 `https://www.potato-ai.top/api/gene_search` 或 `gene_details` 返回 502、超时或暂时不可用，但任务只需要 **symbol → DMv8 gene ID / reported ID** 映射，可在本服务器读取 Potato Knowledge Hub 的本地 SQLite 备份作为降级来源：
+
+```bash
+DB=/mnt/data/jiayuxin/potato_knowledge_hub/260330-add_visit_map/scripts/search_genes/genes.db
+python3 - <<'PY'
+import sqlite3
+p='/mnt/data/jiayuxin/potato_knowledge_hub/260330-add_visit_map/scripts/search_genes/genes.db'
+cur=sqlite3.connect(p).cursor()
+for q in ['BEL5','POTH1','FDL1','SP6A','ABL1','AST1']:
+    print('\n###', q)
+    rows=cur.execute("""
+        select gene_id,gene_symbol,ID_reported,refs,descriptions
+        from new_genes
+        where coalesce(gene_symbol,'') like ?
+           or coalesce(ID_reported,'') like ?
+           or coalesce(refs,'') like ?
+           or coalesce(descriptions,'') like ?
+        limit 20
+    """, tuple(['%'+q+'%']*4)).fetchall()
+    for r in rows:
+        print(r[0], r[1], r[2])
+PY
+```
+
+本地库表结构：`new_genes(gene_id, gene_symbol, ID_reported, refs, descriptions)`。该方式适合核对基因号与历史 ID；不要把它等同于完整 `details` API，因为 domain、表达、文献题名、序列等辅助表可能不在同一路径。
+
+若需要坐标，可用 DMv8.2 GFF3 中的代表转录本验证：
+
+```bash
+GFF=/mnt/data/public_data/Genomes/DMv8/raw_8.2/DMv8.2.repre.gff3
+# DM8C10G26150 -> DM8.2_chr10G26150；在 mRNA 行查 Parent=DM8.2_chr10G26150
+```
+
+注意 ID 版本：SQLite 常用 `DM8C10G26150`，DMv8.2 GFF3/FASTA 常用 `DM8.2_chr10G26150` / `DM8.2_chr10G26150.1`。
+
 ## 注意事项
 
 - 当前环境可能没有 `python` 命令，示例统一使用 `python3`。
 - API 返回的序列和参考文献信息可能很长；不要无条件塞进最终回答。
 - `ID_reported` 经常包含多个历史版本 ID，向用户展示时可适当截断，但保留关键匹配项。
-- 如果 Potato Knowledge Hub API 暂时不可用，应报告连接或 HTTP 错误，不要编造基因信息。
+- 如果 Potato Knowledge Hub API 暂时不可用，应优先尝试本地 SQLite 降级方案；若本地库也不可用，再报告连接或 HTTP 错误，不要编造基因信息。

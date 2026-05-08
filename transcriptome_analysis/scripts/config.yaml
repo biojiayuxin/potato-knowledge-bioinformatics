@@ -19,6 +19,12 @@ gff_file: ""
 # 线程数
 threads: 8
 
+# fastp 额外参数与卡死/假死超时保护
+# 正常样本不受影响；若 fastp 超过 fastp_timeout 仍不退出，timeout 会终止该 rule，Snakemake 可断点重跑。
+fastp_extra: ""
+fastp_timeout: "3h"
+fastp_kill_after: "5m"
+
 # read 长度（用于 prepDE.py3）
 read_length: 150
 
